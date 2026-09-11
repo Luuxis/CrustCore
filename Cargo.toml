@@ -1,0 +1,14 @@
+[package]
+name = "CrustCore"
+version = "1.0.0"
+edition = "2024"
+description = "Core library to download, install and launch Minecraft (versions, assets, libraries, Java runtime, mod loaders)"
+keywords = ["minecraft", "launcher", "download", "java"]
+categories = ["game-development", "api-bindings"]
+license = "MIT"
+
+[lib]
+name = "crust_core"
+path = "src/lib.rs"
+
+[dependencies]
