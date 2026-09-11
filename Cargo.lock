@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "CrustCore"
-version = "1.0.0"
+name = "crust_core"
+version = "1.0.1"

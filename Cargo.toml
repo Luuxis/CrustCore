@@ -1,11 +1,17 @@
 [package]
-name = "CrustCore"
-version = "1.0.0"
+name = "crust_core"
+version = "1.0.1"
 edition = "2024"
+rust-version = "1.85"
 description = "Core library to download, install and launch Minecraft (versions, assets, libraries, Java runtime, mod loaders)"
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/Luuxis/CrustCore"
+homepage = "https://github.com/Luuxis/CrustCore"
+documentation = "https://docs.rs/crust_core"
 keywords = ["minecraft", "launcher", "download", "java"]
 categories = ["game-development", "api-bindings"]
-license = "MIT"
+include = ["src/**", "Cargo.toml", "README.md", "LICENSE"]
 
 [lib]
 name = "crust_core"
