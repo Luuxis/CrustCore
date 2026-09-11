@@ -1,13 +1,8 @@
-pub fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn version_is_not_empty() {
-        assert!(!version().is_empty());
-    }
-}
+pub mod authenticator;
+pub mod checker;
+pub mod foundation;
+pub mod launcher;
+pub mod loader;
+pub mod network;
+pub mod providers;
+pub mod resolver;
