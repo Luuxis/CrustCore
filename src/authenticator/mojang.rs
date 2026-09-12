@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{
-    Account, AccountMeta, AccountProfile, AccountType, Error, Ownership, XboxAccount, XboxSession,
-};
+use super::{Account, AccountMeta, AccountProfile, Error, Ownership, XboxAccount, XboxSession};
 use crate::foundation::{jwt, time};
 use crate::network::HttpClient;
 use crate::providers::mojang::{
@@ -78,24 +76,24 @@ impl MojangAuthenticator {
             client_token: profile.id.clone(),
             uuid: profile.id,
             name: profile.name,
-            refresh_token,
+            refresh_token: Some(refresh_token),
             user_properties: "{}".to_owned(),
-            meta: AccountMeta {
-                kind: AccountType::Xbox,
-                access_token_expires_in: time::expires_at_millis(session.expires_in),
-                demo: false,
+            meta: AccountMeta::xbox(
+                time::expires_at_millis(session.expires_in),
                 ownership,
                 entitlements,
-            },
-            xbox_account: XboxAccount {
+            ),
+            xbox_account: Some(XboxAccount {
                 xuid: xbox.xuid.clone().or_else(|| session.xuid.clone()),
                 gamertag: xbox.gamertag.clone(),
                 age_group: xbox.age_group.clone(),
-            },
+            }),
             profile: AccountProfile {
                 skins: profile.skins,
                 capes: profile.capes,
             },
+            client_id: None,
+            user_info: None,
         })
     }
 }
@@ -146,27 +144,28 @@ mod tests {
             client_token: "ct".into(),
             uuid: "id".into(),
             name: "Luuxis".into(),
-            refresh_token: "rt".into(),
+            refresh_token: Some("rt".into()),
             user_properties: "{}".into(),
-            meta: AccountMeta {
-                kind: AccountType::Xbox,
-                access_token_expires_in: 1,
-                demo: false,
-                ownership: Ownership::GamePass,
-                entitlements: vec!["product_game_pass_pc".into()],
-            },
-            xbox_account: XboxAccount {
+            meta: AccountMeta::xbox(1, Ownership::GamePass, vec!["product_game_pass_pc".into()]),
+            xbox_account: Some(XboxAccount {
                 xuid: Some("x".into()),
                 gamertag: Some("g".into()),
                 age_group: Some("Adult".into()),
-            },
+            }),
             profile: AccountProfile::default(),
+            client_id: None,
+            user_info: None,
         };
         let json = serde_json::to_value(&account).unwrap();
         assert_eq!(json["meta"]["type"], "Xbox");
         assert_eq!(json["meta"]["ownership"], "game_pass");
+        assert_eq!(json["meta"]["access_token_expires_in"], 1);
+        assert!(json["meta"].get("online").is_none());
         assert_eq!(json["xboxAccount"]["ageGroup"], "Adult");
+        assert_eq!(json["refresh_token"], "rt");
         assert_eq!(json["user_properties"], "{}");
+        assert!(json.get("clientId").is_none());
+        assert!(json.get("user_info").is_none());
         assert!(json["profile"]["skins"].is_array());
         let back: Account = serde_json::from_value(json).unwrap();
         assert_eq!(back, account);

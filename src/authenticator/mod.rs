@@ -1,18 +1,27 @@
 mod account;
+pub mod azauth;
 mod error;
 pub mod microsoft;
 pub mod mojang;
+pub mod yggdrasil;
 
 use url::Url;
 
 use crate::foundation::pkce::{PkceChallenge, random_state};
+use crate::foundation::time;
 use crate::network::HttpClient;
 use crate::providers::microsoft::{DeviceCode, MicrosoftOAuth};
 
-pub use account::{Account, AccountMeta, AccountProfile, AccountType, Ownership, XboxAccount};
+pub use account::{
+    Account, AccountMeta, AccountProfile, AccountType, AzAuthUserInfo, Ownership, XboxAccount,
+};
+pub use azauth::{AzAuth, AzAuthLogin};
 pub use error::Error;
 pub use microsoft::{MicrosoftAuthenticator, MicrosoftSession, XboxSession};
 pub use mojang::{MinecraftSession, MojangAuthenticator};
+pub use yggdrasil::Yggdrasil;
+
+const REFRESH_MARGIN_MILLIS: u64 = 2 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone)]
 pub struct Authenticator {
@@ -113,8 +122,32 @@ impl Authenticator {
     }
 
     pub async fn refresh(&self, account: &Account) -> Result<Account, Error> {
-        let session = self.microsoft.refresh(&account.refresh_token).await?;
+        if let Some(expires_at) = account.meta.access_token_expires_in
+            && time::unix_now_millis() < expires_at.saturating_sub(REFRESH_MARGIN_MILLIS)
+        {
+            return self.refresh_profile(account).await;
+        }
+        let refresh_token = account
+            .refresh_token
+            .as_deref()
+            .filter(|token| !token.is_empty())
+            .ok_or(Error::MissingRefreshToken)?;
+        let session = self.microsoft.refresh(refresh_token).await?;
         self.complete(session).await
+    }
+
+    pub async fn refresh_profile(&self, account: &Account) -> Result<Account, Error> {
+        let profile = self
+            .mojang
+            .services()
+            .profile(&account.access_token)
+            .await?;
+        let mut updated = account.clone();
+        updated.profile = AccountProfile {
+            skins: profile.skins,
+            capes: profile.capes,
+        };
+        Ok(updated)
     }
 
     pub async fn complete(&self, session: MicrosoftSession) -> Result<Account, Error> {

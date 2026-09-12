@@ -2,7 +2,6 @@
     "files.exclude": {
         "**/.cargo": true,
         "**/.vscode": true,
-        "**/examples": true,
         "**/target": true,
         "**/Cargo.lock": true
     }

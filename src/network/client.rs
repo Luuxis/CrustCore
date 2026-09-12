@@ -33,6 +33,14 @@ impl HttpClient {
         &self.inner
     }
 
+    pub async fn head(&self, url: &str, timeout: std::time::Duration) -> Option<u64> {
+        let response = self.inner.head(url).timeout(timeout).send().await.ok()?;
+        if response.status().as_u16() != 200 {
+            return None;
+        }
+        Some(response.content_length().unwrap_or(0))
+    }
+
     pub async fn get(&self, url: &str, bearer: Option<&str>) -> Result<Response, Error> {
         let mut request = self.inner.get(url).header("Accept", "application/json");
         if let Some(token) = bearer {

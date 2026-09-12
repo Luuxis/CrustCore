@@ -7,7 +7,8 @@ use crate::network::{self, HttpClient, Response};
 pub const DEFAULT_CLIENT_ID: &str = "00000000402b5328";
 pub const DEFAULT_SCOPE: &str = "XboxLive.signin offline_access";
 pub const LIVE_DESKTOP_REDIRECT_URI: &str = "https://login.live.com/oauth20_desktop.srf";
-pub const NATIVE_CLIENT_REDIRECT_URI: &str = "https://login.microsoftonline.com/common/oauth2/nativeclient";
+pub const NATIVE_CLIENT_REDIRECT_URI: &str =
+    "https://login.microsoftonline.com/common/oauth2/nativeclient";
 
 const LIVE_COBRAND_ID: &str = "8058f65d-ce06-4c30-9559-473c9275a65d";
 const GRANT_DEVICE_CODE: &str = "urn:ietf:params:oauth:grant-type:device_code";
@@ -353,11 +354,16 @@ mod tests {
             status: 200,
             body: r#"{"user_code":"PR486LHB","device_code":"abc","verification_uri":"https://www.microsoft.com/link","interval":5,"expires_in":900}"#.into(),
         };
-        let code = MicrosoftOAuth::parse::<DeviceCode>(response).unwrap().unwrap();
+        let code = MicrosoftOAuth::parse::<DeviceCode>(response)
+            .unwrap()
+            .unwrap();
         assert_eq!(code.user_code, "PR486LHB");
         assert_eq!(code.interval, 5);
         assert!(code.message.is_empty());
-        assert_eq!(code.verification_uri_complete(), "https://www.microsoft.com/link?otc=PR486LHB");
+        assert_eq!(
+            code.verification_uri_complete(),
+            "https://www.microsoft.com/link?otc=PR486LHB"
+        );
     }
 
     #[test]

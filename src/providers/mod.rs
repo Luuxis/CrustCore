@@ -1,3 +1,10 @@
+pub mod azauth;
+pub mod azul;
+pub mod fabric;
+pub mod forge;
+pub mod launchermeta;
 pub mod microsoft;
 pub mod mojang;
+pub mod neoforge;
 pub mod xbox;
+pub mod yggdrasil;

@@ -1,6 +1,6 @@
 use super::Ownership;
 use crate::network;
-use crate::providers::{microsoft, mojang, xbox};
+use crate::providers::{azauth, microsoft, mojang, xbox, yggdrasil};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -12,6 +12,12 @@ pub enum Error {
     Xbox(#[from] xbox::Error),
     #[error(transparent)]
     Minecraft(#[from] mojang::Error),
+    #[error(transparent)]
+    Yggdrasil(#[from] yggdrasil::Error),
+    #[error(transparent)]
+    AzAuth(#[from] azauth::Error),
+    #[error("invalid url: {0}")]
+    InvalidUrl(#[from] url::ParseError),
     #[error("the user declined the sign-in request")]
     DeviceCodeDeclined,
     #[error("the device code expired before the user signed in")]
