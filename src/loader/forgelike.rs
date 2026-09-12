@@ -55,7 +55,8 @@ pub async fn install(
         return Err(Error::Invalid("Invalid neoForge profile".into()));
     }
 
-    let json = LoaderJson::from_value(profile.version.clone(), config.loader_dir.clone())?;
+    let mut json = LoaderJson::from_value(profile.version.clone(), config.loader_dir.clone())?;
+    super::patch_libraries(&mut json, Platform::current());
     if let Some(id) = &json.id {
         write_version_files(
             &config.loader_dir,

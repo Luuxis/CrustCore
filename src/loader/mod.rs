@@ -178,6 +178,10 @@ pub async fn install(
     Ok(json)
 }
 
+pub(crate) fn patch_libraries(json: &mut LoaderJson, platform: crate::foundation::os::Platform) {
+    json.libraries = crate::resolver::patches::apply(&json.libraries, platform);
+}
+
 pub(crate) fn write_version_files(
     loader_dir: &Path,
     id: &str,
@@ -257,5 +261,38 @@ mod tests {
         assert!(json.minecraft_arguments.is_some());
         assert_eq!(json.libraries.len(), 2);
         assert!(json.libraries[1].downloads.is_none());
+    }
+
+    #[test]
+    fn loader_jna_is_upgraded_on_macos() {
+        let raw: serde_json::Value = serde_json::from_str(
+            r#"{
+            "id": "1.18.2-forge-40.3.12",
+            "mainClass": "cpw.mods.bootstraplauncher.BootstrapLauncher",
+            "arguments": {"game": [], "jvm": ["-DmergeModules=jna-5.12.1.jar,jna-platform-5.12.1.jar,java-objc-bridge-1.0.0.jar"]},
+            "libraries": [
+                {"name": "net.java.dev.jna:jna:5.12.1", "downloads": {"artifact": {"path": "net/java/dev/jna/jna/5.12.1/jna-5.12.1.jar", "sha1": "a", "size": 1, "url": "https://maven.minecraftforge.net/net/java/dev/jna/jna/5.12.1/jna-5.12.1.jar"}}},
+                {"name": "net.java.dev.jna:jna-platform:5.12.1", "downloads": {"artifact": {"path": "net/java/dev/jna/jna-platform/5.12.1/jna-platform-5.12.1.jar", "sha1": "b", "size": 1, "url": "https://maven.minecraftforge.net/net/java/dev/jna/jna-platform/5.12.1/jna-platform-5.12.1.jar"}}},
+                {"name": "ca.weblite:java-objc-bridge:1.0.0"}
+            ]
+        }"#,
+        )
+        .unwrap();
+        let mut json = LoaderJson::from_value(raw.clone(), PathBuf::from("/root")).unwrap();
+        patch_libraries(&mut json, crate::foundation::os::Platform::MacOs);
+        let names: Vec<&str> = json.libraries.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "net.java.dev.jna:jna:5.13.0",
+                "net.java.dev.jna:jna-platform:5.13.0",
+                "ca.weblite:java-objc-bridge:1.0.0"
+            ]
+        );
+        assert_eq!(json.raw, raw);
+
+        let mut windows = LoaderJson::from_value(raw, PathBuf::from("/root")).unwrap();
+        patch_libraries(&mut windows, crate::foundation::os::Platform::Windows);
+        assert_eq!(windows.libraries[0].name, "net.java.dev.jna:jna:5.12.1");
     }
 }

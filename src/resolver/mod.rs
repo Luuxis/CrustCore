@@ -206,7 +206,8 @@ impl Resolver {
         for library in &json.libraries {
             let downloads = library.downloads.as_ref();
             let (artifact, label) = if let Some(natives) = &library.natives {
-                let Some(native) = natives.get(os_name) else {
+                let Some(native) = crate::foundation::os::native_classifier(natives, self.platform)
+                else {
                     continue;
                 };
                 let classifier = native.replace("${arch}", self.arch.bits());
@@ -499,6 +500,42 @@ mod tests {
             &mut win,
         );
         assert!(win.natives[0].ends_with("lwjgl-platform-2.9.4-natives-windows-64.jar"));
+    }
+
+    #[test]
+    fn accepts_node_platform_native_keys() {
+        let json = version(
+            r#"{
+            "id": "1.12.2", "mainClass": "m",
+            "downloads": {"client": {"sha1": "c", "size": 1, "url": "cu"}},
+            "libraries": [
+                {"name": "org.lwjgl.lwjgl:lwjgl-platform:2.9.4",
+                 "natives": {"darwin": "natives-osx", "win32": "natives-windows-${arch}"},
+                 "downloads": {"classifiers": {
+                    "natives-osx": {"path": "org/lwjgl/lwjgl/lwjgl-platform/2.9.4/lwjgl-platform-2.9.4-natives-osx.jar", "sha1": "s", "size": 1, "url": "u"},
+                    "natives-windows-64": {"path": "org/lwjgl/lwjgl/lwjgl-platform/2.9.4/lwjgl-platform-2.9.4-natives-windows-64.jar", "sha1": "s", "size": 1, "url": "u"}
+                 }}}
+            ]}"#,
+        );
+        let mut mac = GameFiles::default();
+        resolver(Platform::MacOs, Arch::X64).resolve_libraries(&json, Path::new("/root"), &mut mac);
+        assert!(mac.natives[0].ends_with("lwjgl-platform-2.9.4-natives-osx.jar"));
+
+        let mut win = GameFiles::default();
+        resolver(Platform::Windows, Arch::X64).resolve_libraries(
+            &json,
+            Path::new("/root"),
+            &mut win,
+        );
+        assert!(win.natives[0].ends_with("lwjgl-platform-2.9.4-natives-windows-64.jar"));
+
+        let mut linux = GameFiles::default();
+        resolver(Platform::Linux, Arch::X64).resolve_libraries(
+            &json,
+            Path::new("/root"),
+            &mut linux,
+        );
+        assert!(linux.downloads.is_empty());
     }
 
     #[test]

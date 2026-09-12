@@ -5,7 +5,7 @@ use super::Error;
 use crate::authenticator::Account;
 use crate::foundation::maven::library_path;
 use crate::foundation::options::LaunchOptions;
-use crate::foundation::os::Platform;
+use crate::foundation::os::{Platform, native_classifier};
 use crate::foundation::rules::evaluate_node;
 use crate::foundation::semver::{self, Version};
 use crate::loader::LoaderJson;
@@ -165,7 +165,13 @@ pub fn game_arguments(input: &ArgumentsInput<'_>) -> Vec<String> {
     let mut result: Vec<String> = game
         .into_iter()
         .filter_map(|token| match token {
-            Token::Text(value) => Some(placeholders.get(value.as_str()).cloned().unwrap_or(value)),
+            Token::Text(value) => Some(
+                placeholders
+                    .get(value.as_str())
+                    .filter(|replacement| !replacement.is_empty())
+                    .cloned()
+                    .unwrap_or(value),
+            ),
             Token::Object => None,
         })
         .collect();
@@ -178,9 +184,6 @@ pub fn game_arguments(input: &ArgumentsInput<'_>) -> Vec<String> {
         result.push(width.to_string());
         result.push("--height".to_owned());
         result.push(height.to_string());
-    }
-    if options.screen.fullscreen {
-        result.push("--fullscreen".to_owned());
     }
     result.extend(options.game_args.iter().cloned());
     result
@@ -376,7 +379,7 @@ pub fn classpath(input: &ArgumentsInput<'_>) -> (Vec<String>, Option<String>) {
             continue;
         }
         if let Some(natives) = &library.natives {
-            if natives.get(os_name).is_none() {
+            if native_classifier(natives, platform).is_none() {
                 continue;
             }
         } else if let Some(rules) = &library.rules
@@ -848,5 +851,95 @@ mod tests {
             natives_list: false,
         };
         assert_eq!(game_arguments(&input), vec!["msa", "xuid", "client"]);
+    }
+
+    #[test]
+    fn empty_placeholder_values_stay_literal_like_node() {
+        let version: VersionJson = serde_json::from_str(
+            r#"{"id": "1.20.1", "type": "release", "mainClass": "m", "arguments": {"game": ["--userProperties", "${user_properties}", "--uuid", "${auth_uuid}"]}, "downloads": {}, "libraries": []}"#,
+        )
+        .unwrap();
+        let mut account = account();
+        account.user_properties = String::new();
+        let options = options();
+        let input = ArgumentsInput {
+            version: &version,
+            loader: None,
+            account: &account,
+            options: &options,
+            natives_list: false,
+        };
+        assert_eq!(
+            game_arguments(&input),
+            vec!["--userProperties", "${user_properties}", "--uuid", "uuid"]
+        );
+    }
+
+    #[test]
+    fn screen_options_follow_node() {
+        let version = modern_version();
+        let account = account();
+        let mut options = options();
+        options.screen.fullscreen = true;
+        options.screen.width = Some(1280);
+        options.screen.height = None;
+        let input = ArgumentsInput {
+            version: &version,
+            loader: None,
+            account: &account,
+            options: &options,
+            natives_list: false,
+        };
+        let game = game_arguments(&input);
+        assert!(!game.iter().any(|a| a == "--fullscreen" || a == "--width"));
+
+        options.screen.height = Some(720);
+        let input = ArgumentsInput {
+            version: &version,
+            loader: None,
+            account: &account,
+            options: &options,
+            natives_list: false,
+        };
+        let game = game_arguments(&input);
+        let width = game.iter().position(|a| a == "--width").unwrap();
+        assert_eq!(
+            &game[width..width + 4],
+            &["--width", "1280", "--height", "720"]
+        );
+        assert!(!game.contains(&"--fullscreen".to_owned()));
+    }
+
+    #[test]
+    fn classpath_accepts_node_platform_native_keys() {
+        let version: VersionJson = serde_json::from_str(
+            r#"{"id": "1.12.2", "type": "release", "mainClass": "m", "assets": "1.12", "downloads": {}, "libraries": [
+                {"name": "org.lwjgl.lwjgl:lwjgl-platform:2.9.4", "natives": {"darwin": "natives-osx", "win32": "natives-windows", "linux": "natives-linux"}},
+                {"name": "com.example:solaris-only:1.0", "natives": {"solaris": "natives-solaris"}},
+                {"name": "com.example:plain:1.0"}
+            ]}"#,
+        )
+        .unwrap();
+        let account = account();
+        let options = LaunchOptions::new("/root", "1.12.2");
+        let input = ArgumentsInput {
+            version: &version,
+            loader: None,
+            account: &account,
+            options: &options,
+            natives_list: true,
+        };
+        let (cp, _) = classpath(&input);
+        let entries: Vec<&str> = cp[1]
+            .split(Platform::current().classpath_separator())
+            .collect();
+        assert_eq!(
+            entries,
+            vec![
+                "/root/libraries/org/lwjgl/lwjgl/lwjgl-platform/2.9.4/lwjgl-platform-2.9.4.jar",
+                "/root/libraries/com/example/plain/1.0/plain-1.0.jar",
+                "/root/versions/1.12.2/1.12.2.jar"
+            ]
+        );
     }
 }

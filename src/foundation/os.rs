@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
     Windows,
@@ -28,6 +30,14 @@ impl Platform {
         match self {
             Self::Windows => "windows",
             Self::MacOs => "osx",
+            Self::Linux => "linux",
+        }
+    }
+
+    pub fn node_name(self) -> &'static str {
+        match self {
+            Self::Windows => "win32",
+            Self::MacOs => "darwin",
             Self::Linux => "linux",
         }
     }
@@ -85,6 +95,14 @@ pub fn effective_arch(platform: Platform, arch: Arch, intel_enabled_mac: bool) -
     }
 }
 
+pub fn native_classifier(natives: &HashMap<String, String>, platform: Platform) -> Option<&str> {
+    [platform.mojang_name(), platform.node_name()]
+        .into_iter()
+        .filter_map(|key| natives.get(key))
+        .map(String::as_str)
+        .find(|value| !value.is_empty())
+}
+
 pub fn java_runtime_platform(platform: Platform, arch: Arch) -> Option<&'static str> {
     match (platform, arch) {
         (Platform::Windows, Arch::X64) => Some("windows-x64"),
@@ -130,6 +148,23 @@ mod tests {
             Arch::Arm64
         );
         assert_eq!(effective_arch(Platform::MacOs, Arch::X64, true), Arch::X64);
+    }
+
+    #[test]
+    fn native_classifier_falls_back_to_node_platform_names() {
+        let mut natives = HashMap::new();
+        natives.insert("darwin".to_owned(), "natives-macos".to_owned());
+        natives.insert("windows".to_owned(), String::new());
+        natives.insert("win32".to_owned(), "natives-windows".to_owned());
+        assert_eq!(
+            native_classifier(&natives, Platform::MacOs),
+            Some("natives-macos")
+        );
+        assert_eq!(
+            native_classifier(&natives, Platform::Windows),
+            Some("natives-windows")
+        );
+        assert_eq!(native_classifier(&natives, Platform::Linux), None);
     }
 
     #[test]
