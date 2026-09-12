@@ -115,6 +115,7 @@ impl LaunchOptions {
     pub fn new(root: impl Into<PathBuf>, version: impl Into<String>) -> Self {
         let root: PathBuf = root.into();
         let root = std::path::absolute(&root).unwrap_or(root);
+        let root = simplify_path(&root);
         Self {
             url: None,
             root,
@@ -170,6 +171,52 @@ impl LaunchOptions {
     }
 }
 
+/// Strips the Windows verbatim prefix (`\\?\C:\...` or `\\?\UNC\...`) that
+/// `Path::canonicalize` produces.
+///
+/// The JVM (Java 8 in particular) cannot resolve verbatim paths given through
+/// `-Djava.library.path` or `-cp`, which makes the game fail with
+/// `UnsatisfiedLinkError: no lwjgl64 in java.library.path`. Every path handed
+/// to Java therefore goes through this function first.
+#[cfg(windows)]
+pub fn simplify_path(path: &Path) -> PathBuf {
+    use std::ffi::OsString;
+    use std::path::Prefix;
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return path.to_path_buf();
+    };
+    let mut out = match prefix.kind() {
+        Prefix::VerbatimDisk(disk) => PathBuf::from(format!("{}:\\", disk as char)),
+        Prefix::VerbatimUNC(server, share) => {
+            let mut base = OsString::from(r"\\");
+            base.push(server);
+            base.push(r"\");
+            base.push(share);
+            base.push(r"\");
+            PathBuf::from(base)
+        }
+        _ => return path.to_path_buf(),
+    };
+    for component in components {
+        match component {
+            Component::Normal(part) => out.push(part),
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+        }
+    }
+    out
+}
+
+/// Returns the path unchanged: verbatim prefixes only exist on Windows.
+#[cfg(not(windows))]
+pub fn simplify_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
 pub fn join_normalized(base: &Path, relative: &str) -> PathBuf {
     let mut out = base.to_path_buf();
     for component in Path::new(relative).components() {
@@ -211,6 +258,38 @@ mod tests {
             PathBuf::from("/root/loader/forge")
         );
         assert_eq!(join_normalized(base, "/abs"), PathBuf::from("/root/abs"));
+    }
+
+    #[test]
+    fn simplify_keeps_regular_paths() {
+        assert_eq!(
+            simplify_path(Path::new("/root/minecraft")),
+            PathBuf::from("/root/minecraft")
+        );
+        assert_eq!(
+            simplify_path(Path::new("relative")),
+            PathBuf::from("relative")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn simplify_strips_windows_verbatim_prefixes() {
+        assert_eq!(
+            simplify_path(Path::new(r"\\?\C:\Users\me\data\minecraft")),
+            PathBuf::from(r"C:\Users\me\data\minecraft")
+        );
+        assert_eq!(
+            simplify_path(Path::new(r"\\?\UNC\server\share\minecraft")),
+            PathBuf::from(r"\\server\share\minecraft")
+        );
+        assert_eq!(
+            simplify_path(Path::new(r"C:\Users\me\data")),
+            PathBuf::from(r"C:\Users\me\data")
+        );
+        let options = LaunchOptions::new(r"\\?\C:\Users\me\data\minecraft", "1.12.2");
+        assert_eq!(options.root, PathBuf::from(r"C:\Users\me\data\minecraft"));
+        assert!(!options.root.display().to_string().starts_with(r"\\?\"));
     }
 
     #[test]

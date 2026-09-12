@@ -18,12 +18,11 @@ const CLIENT_ID: Option<&str> = None;
 const DATA_DIR: &str = "./data";
 const ACCOUNT_FILE: &str = "account.json";
 const MINECRAFT_PATH: &str = "minecraft";
-const API_URL: &str =
-    "https://luuxcraft.fr/api/user/bb8f5247-1d38-41bb-ab6d-3200471a06b2/instances";
+const API_URL: &str = "https://luuxcraft.fr/api/user/bb8f5247-1d38-41bb-ab6d-3200471a06b2/instances";
 const INSTANCE_NAME: &str = "dev";
 const DOWNLOAD_SIMULTANEOUS: usize = 30;
-const JAVA_VERSION: &str = "26"; // "default" for default system Java, or specify a version like "8", "11", etc.
-const JAVA_TYPE: &str = "jdk"; // "default" for default system Java, or specify a type like "hotspot", "openj9", etc.
+const JAVA_VERSION: &str = "default"; // "default" for default system Java, or specify a version like "8", "11", etc.
+const JAVA_TYPE: &str = "default"; // "default" for default system Java, or specify a type like "hotspot", "openj9", etc.
 const MEMORY_CONFIG: (&str, &str) = ("14G", "16G");
 const INTEL_ENABLED_MAC: bool = true;
 const JVM_ARGS: &[&str] = &[];
@@ -83,7 +82,9 @@ fn data_dir(subdir: Option<&str>) -> PathBuf {
         dir.push(subdir);
     }
     fs::create_dir_all(&dir).expect("failed to create the data directory");
-    dir.canonicalize().unwrap_or(dir)
+    // `canonicalize` would return a `\\?\C:\...` path on Windows, which Java
+    // cannot use for `java.library.path`; `absolute` keeps a plain path.
+    std::path::absolute(&dir).unwrap_or(dir)
 }
 
 fn account_path() -> PathBuf {

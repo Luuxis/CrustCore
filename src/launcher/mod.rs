@@ -18,6 +18,7 @@ use crate::resolver::{self, GameFiles, LABEL_LOG_CONFIGS, ResolvedVersion, Resol
 
 pub use crate::foundation::options::{
     JavaOptions, LaunchOptions, LoaderKind, LoaderOptions, MemoryOptions, ScreenOptions,
+    simplify_path,
 };
 pub use arguments::{ArgumentsInput, LaunchPlan};
 pub use natives::extract_natives;
@@ -75,7 +76,13 @@ pub struct Launch {
 }
 
 impl Launch {
-    pub fn new(options: LaunchOptions, account: Account) -> Result<Self, Error> {
+    pub fn new(mut options: LaunchOptions, account: Account) -> Result<Self, Error> {
+        // Paths may have been set directly on the struct (or canonicalized by
+        // the caller): make sure nothing verbatim (`\\?\`) reaches the JVM.
+        options.root = simplify_path(&options.root);
+        if let Some(java) = &options.java.path {
+            options.java.path = Some(simplify_path(java));
+        }
         Ok(Self {
             http: HttpClient::new()?,
             options,
