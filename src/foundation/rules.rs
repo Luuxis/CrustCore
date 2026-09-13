@@ -98,14 +98,20 @@ pub fn skip_library_node(rules: Option<&[Rule]>, platform: Platform) -> bool {
 pub struct RuleContext {
     pub platform: Platform,
     pub arch: Arch,
+    pub os_version: Option<String>,
     pub features: HashMap<String, bool>,
 }
 
 impl RuleContext {
     pub fn current() -> Self {
+        Self::new(Platform::current(), Arch::current())
+    }
+
+    pub fn new(platform: Platform, arch: Arch) -> Self {
         Self {
-            platform: Platform::current(),
-            arch: Arch::current(),
+            platform,
+            arch,
+            os_version: (platform == Platform::Windows).then(|| "10.0".to_owned()),
             features: HashMap::new(),
         }
     }
@@ -133,6 +139,11 @@ impl Rule {
             {
                 return false;
             }
+            if let Some(pattern) = &os.version
+                && !version_matches(pattern, ctx.os_version.as_deref())
+            {
+                return false;
+            }
         }
         if let Some(features) = &self.features {
             for (name, expected) in features {
@@ -142,6 +153,22 @@ impl Rule {
             }
         }
         true
+    }
+}
+
+fn version_matches(pattern: &str, os_version: Option<&str>) -> bool {
+    let Some(os_version) = os_version else {
+        return false;
+    };
+    let anchored = pattern.starts_with('^');
+    let literal = pattern
+        .trim_start_matches('^')
+        .trim_end_matches('$')
+        .replace("\\.", ".");
+    if anchored {
+        os_version.starts_with(&literal)
+    } else {
+        os_version.contains(&literal)
     }
 }
 
@@ -173,11 +200,26 @@ mod tests {
     use super::*;
 
     fn ctx(platform: Platform, arch: Arch) -> RuleContext {
-        RuleContext {
-            platform,
-            arch,
-            features: HashMap::new(),
-        }
+        RuleContext::new(platform, arch)
+    }
+
+    #[test]
+    fn windows_version_rule_matches_windows_10_only() {
+        let rules = vec![Rule {
+            action: Action::Allow,
+            os: Some(OsRule {
+                name: Some("windows".into()),
+                version: Some("^10\\.".into()),
+                ..OsRule::default()
+            }),
+            features: None,
+        }];
+        assert!(allowed(&rules, &ctx(Platform::Windows, Arch::X64)));
+        assert!(!allowed(&rules, &ctx(Platform::Linux, Arch::X64)));
+        assert!(!allowed(&rules, &ctx(Platform::MacOs, Arch::Arm64)));
+        assert!(version_matches("^10\\.", Some("10.0")));
+        assert!(!version_matches("^10\\.", Some("6.1")));
+        assert!(!version_matches("^10\\.", None));
     }
 
     fn os(name: &str) -> Option<OsRule> {

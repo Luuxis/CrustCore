@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 use super::Error;
 use crate::authenticator::Account;
 use crate::foundation::maven::library_path;
-use crate::foundation::options::LaunchOptions;
+use crate::foundation::options::{LaunchOptions, LoaderKind};
 use crate::foundation::os::{Platform, native_classifier};
-use crate::foundation::rules::evaluate_node;
+use crate::foundation::rules::{RuleContext, allowed};
 use crate::foundation::semver::{self, Version};
 use crate::loader::LoaderJson;
 use crate::providers::launchermeta::{Argument, Library, VersionJson};
@@ -39,22 +39,19 @@ impl LaunchPlan {
     }
 }
 
-enum Token {
-    Text(String),
-    Object,
-}
+const LAUNCHER_NAME: &str = "crust_core";
+const LAUNCHER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn build(input: &ArgumentsInput<'_>, java: PathBuf) -> Result<LaunchPlan, Error> {
     let game = game_arguments(input);
     let jvm = jvm_arguments(input);
-    let (classpath, main_class) = classpath(input);
+    let (_, main_class) = classpath(input);
     let (loader_jvm, loader_game) = loader_arguments(input);
     let main_class = main_class.ok_or(Error::NoMainClass)?;
 
     let mut args = Vec::new();
-    args.extend(jvm);
-    args.extend(classpath);
     args.extend(loader_jvm);
+    args.extend(jvm);
     args.push(main_class.clone());
     args.extend(game);
     args.extend(loader_game);
@@ -67,26 +64,59 @@ pub fn build(input: &ArgumentsInput<'_>, java: PathBuf) -> Result<LaunchPlan, Er
     })
 }
 
+pub fn rule_context(input: &ArgumentsInput<'_>) -> RuleContext {
+    RuleContext::current()
+        .with_feature("is_demo_user", input.account.meta.demo)
+        .with_feature(
+            "has_custom_resolution",
+            custom_resolution(input.options).is_some(),
+        )
+}
+
+fn custom_resolution(options: &LaunchOptions) -> Option<(u32, u32)> {
+    match (options.screen.width, options.screen.height) {
+        (Some(width), Some(height)) if width != 0 && height != 0 => Some((width, height)),
+        _ => None,
+    }
+}
+
+fn resolve_argument(argument: &Argument, context: &RuleContext) -> Vec<String> {
+    match argument {
+        Argument::Plain(value) => vec![value.clone()],
+        Argument::Conditional { rules, value } => {
+            if allowed(rules, context) {
+                value.values()
+            } else {
+                Vec::new()
+            }
+        }
+    }
+}
+
+fn substitute(value: &str, placeholders: &HashMap<&str, String>) -> String {
+    let mut result = value.to_owned();
+    for (key, replacement) in placeholders {
+        if !replacement.is_empty() && result.contains(key) {
+            result = result.replace(key, replacement);
+        }
+    }
+    result
+}
+
 pub fn game_arguments(input: &ArgumentsInput<'_>) -> Vec<String> {
     let version = input.version;
     let options = input.options;
-    let account = input.account;
+    let context = rule_context(input);
 
-    let mut game: Vec<Token> = match &version.minecraft_arguments {
-        Some(arguments) => arguments
-            .split(' ')
-            .map(|s| Token::Text(s.to_owned()))
-            .collect(),
+    let mut game: Vec<String> = match &version.minecraft_arguments {
+        Some(arguments) => arguments.split(' ').map(str::to_owned).collect(),
         None => version
             .arguments
             .as_ref()
             .map(|a| {
                 a.game
                     .iter()
-                    .map(|argument| match argument {
-                        Argument::Plain(value) => Token::Text(value.clone()),
-                        Argument::Conditional { .. } => Token::Object,
-                    })
+                    .flat_map(|argument| resolve_argument(argument, &context))
                     .collect()
             })
             .unwrap_or_default(),
@@ -94,21 +124,42 @@ pub fn game_arguments(input: &ArgumentsInput<'_>) -> Vec<String> {
 
     if let Some(loader) = input.loader {
         if let Some(arguments) = &loader.minecraft_arguments {
-            game.extend(arguments.split(' ').map(|s| Token::Text(s.to_owned())));
+            game.extend(arguments.split(' ').map(str::to_owned));
         }
         let mut seen: Vec<String> = Vec::new();
-        game.retain(|token| match token {
-            Token::Text(value) => {
-                if seen.contains(value) {
-                    false
-                } else {
-                    seen.push(value.clone());
-                    true
-                }
+        game.retain(|value| {
+            if seen.contains(value) {
+                false
+            } else {
+                seen.push(value.clone());
+                true
             }
-            Token::Object => true,
         });
     }
+
+    let placeholders = placeholders(input);
+    let mut result: Vec<String> = game
+        .iter()
+        .map(|value| substitute(value, &placeholders))
+        .collect();
+
+    if version.minecraft_arguments.is_some()
+        && let Some((width, height)) = custom_resolution(options)
+    {
+        result.push("--width".to_owned());
+        result.push(width.to_string());
+        result.push("--height".to_owned());
+        result.push(height.to_string());
+    }
+    result.extend(options.game_args.iter().cloned());
+    result
+}
+
+pub fn placeholders(input: &ArgumentsInput<'_>) -> HashMap<&'static str, String> {
+    let version = input.version;
+    let options = input.options;
+    let account = input.account;
+    let platform = Platform::current();
 
     let user_type = if version.id.starts_with("1.16") {
         "Xbox".to_owned()
@@ -161,32 +212,24 @@ pub fn game_arguments(input: &ArgumentsInput<'_>) -> Vec<String> {
     placeholders.insert("${game_assets}", assets_root);
     placeholders.insert("${version_type}", version.kind.clone());
     placeholders.insert("${clientid}", client_id);
-
-    let mut result: Vec<String> = game
-        .into_iter()
-        .filter_map(|token| match token {
-            Token::Text(value) => Some(
-                placeholders
-                    .get(value.as_str())
-                    .filter(|replacement| !replacement.is_empty())
-                    .cloned()
-                    .unwrap_or(value),
-            ),
-            Token::Object => None,
-        })
-        .collect();
-
-    if let (Some(width), Some(height)) = (options.screen.width, options.screen.height)
-        && width != 0
-        && height != 0
-    {
-        result.push("--width".to_owned());
-        result.push(width.to_string());
-        result.push("--height".to_owned());
-        result.push(height.to_string());
+    if let Some((width, height)) = custom_resolution(options) {
+        placeholders.insert("${resolution_width}", width.to_string());
+        placeholders.insert("${resolution_height}", height.to_string());
     }
-    result.extend(options.game_args.iter().cloned());
-    result
+    placeholders.insert("${natives_directory}", natives_directory(options, version));
+    placeholders.insert("${launcher_name}", LAUNCHER_NAME.to_owned());
+    placeholders.insert("${launcher_version}", LAUNCHER_VERSION.to_owned());
+    placeholders.insert("${classpath}", classpath(input).0.remove(1));
+    placeholders.insert(
+        "${classpath_separator}",
+        platform.classpath_separator().to_string(),
+    );
+    placeholders.insert("${library_directory}", format!("{root}/libraries"));
+    placeholders
+}
+
+fn natives_directory(options: &LaunchOptions, version: &VersionJson) -> String {
+    format!("{}/versions/{}/natives", display(&options.root), version.id)
 }
 
 pub fn jvm_arguments(input: &ArgumentsInput<'_>) -> Vec<String> {
@@ -194,9 +237,26 @@ pub fn jvm_arguments(input: &ArgumentsInput<'_>) -> Vec<String> {
     let options = input.options;
     let platform = Platform::current();
     let root = display(&options.root);
-    let natives = format!("{root}/versions/{}/natives", version.id);
+    let natives = natives_directory(options, version);
+    let context = rule_context(input);
+    let placeholders = placeholders(input);
 
-    let mut jvm = vec![
+    let mut jvm: Vec<String> = match &version.arguments {
+        Some(arguments) => arguments
+            .jvm
+            .iter()
+            .flat_map(|argument| resolve_argument(argument, &context))
+            .map(|value| substitute(&value, &placeholders))
+            .collect(),
+        None => vec![format!("-Djava.library.path={natives}")],
+    };
+    jvm.retain(|arg| !arg.starts_with("-Dminecraft.launcher."));
+    if !jvm.iter().any(|arg| arg == "-cp") {
+        jvm.push("-cp".to_owned());
+        jvm.push(placeholders["${classpath}"].clone());
+    }
+
+    let mut extras = vec![
         format!("-Xms{}", options.memory.min),
         format!("-Xmx{}", options.memory.max),
         "-XX:+UnlockExperimentalVMOptions".to_owned(),
@@ -210,27 +270,23 @@ pub fn jvm_arguments(input: &ArgumentsInput<'_>) -> Vec<String> {
         format!("-Dio.netty.native.workdir={natives}"),
     ];
 
-    if version.minecraft_arguments.is_none() {
-        let os_specific = match platform {
-            Platform::Windows => {
-                "-XX:HeapDumpPath=MojangTricksIntelDriversForPerformance_javaw.exe_minecraft.exe.heapdump"
-            }
-            Platform::MacOs => "-XstartOnFirstThread",
-            Platform::Linux => "-Xss1M",
-        };
-        jvm.push(os_specific.to_owned());
+    if platform == Platform::MacOs
+        && input.loader.is_some()
+        && options.loader.kind == Some(LoaderKind::Forge)
+    {
+        extras.push("-Dfml.earlyprogresswindow=false".to_owned());
     }
 
     if options.bypass_offline {
-        jvm.push("-Dminecraft.api.auth.host=https://nope.invalid/".to_owned());
-        jvm.push("-Dminecraft.api.account.host=https://nope.invalid/".to_owned());
-        jvm.push("-Dminecraft.api.session.host=https://nope.invalid/".to_owned());
-        jvm.push("-Dminecraft.api.services.host=https://nope.invalid/".to_owned());
+        extras.push("-Dminecraft.api.auth.host=https://nope.invalid/".to_owned());
+        extras.push("-Dminecraft.api.account.host=https://nope.invalid/".to_owned());
+        extras.push("-Dminecraft.api.session.host=https://nope.invalid/".to_owned());
+        extras.push("-Dminecraft.api.services.host=https://nope.invalid/".to_owned());
     }
 
-    if input.natives_list {
-        jvm.push(format!("-Djava.library.path={natives}"));
-    }
+    let provided: std::collections::HashSet<String> = jvm.iter().map(|arg| arg_key(arg)).collect();
+    extras.retain(|arg| !provided.contains(&arg_key(arg)));
+    jvm.extend(extras);
 
     if platform == Platform::MacOs
         && let Some(assets) = &version.assets
@@ -250,7 +306,7 @@ pub fn jvm_arguments(input: &ArgumentsInput<'_>) -> Vec<String> {
         jvm.push(client.argument.replace("${path}", &config));
     }
 
-    let defaults = default_user_jvm_arguments(version, &jvm, &options.jvm_args, platform);
+    let defaults = default_user_jvm_arguments(version, &jvm, &options.jvm_args, &context);
     jvm.extend(defaults);
     jvm.extend(options.jvm_args.iter().cloned());
     jvm
@@ -272,7 +328,7 @@ fn default_user_jvm_arguments(
     version: &VersionJson,
     existing: &[String],
     user_args: &[String],
-    platform: Platform,
+    context: &RuleContext,
 ) -> Vec<String> {
     let Some(arguments) = &version.arguments else {
         return Vec::new();
@@ -285,7 +341,7 @@ fn default_user_jvm_arguments(
     let mut defaults = Vec::new();
     for entry in &arguments.default_user_jvm {
         if let Some(rules) = &entry.rules
-            && !evaluate_node(rules, platform)
+            && !allowed(rules, context)
         {
             continue;
         }
@@ -323,7 +379,7 @@ pub fn classpath(input: &ArgumentsInput<'_>) -> (Vec<String>, Option<String>) {
     let version = input.version;
     let options = input.options;
     let platform = Platform::current();
-    let os_name = platform.mojang_name();
+    let context = rule_context(input);
 
     let mut combined: Vec<(&Library, bool)> = Vec::new();
     if let Some(loader) = input.loader {
@@ -340,6 +396,9 @@ pub fn classpath(input: &ArgumentsInput<'_>) -> (Vec<String>, Option<String>) {
     let mut order: Vec<String> = Vec::new();
     let mut latest: HashMap<String, (&Library, bool, Version)> = HashMap::new();
     for (library, is_loader) in combined {
+        if !is_loader && !library_applies(library, platform, &context) {
+            continue;
+        }
         let parts = library_path(&library.name, None, None);
         let Some(lib_version) = semver::coerce(&parts.version) else {
             continue;
@@ -378,15 +437,7 @@ pub fn classpath(input: &ArgumentsInput<'_>) -> (Vec<String>, Option<String>) {
         {
             continue;
         }
-        if let Some(natives) = &library.natives {
-            if native_classifier(natives, platform).is_none() {
-                continue;
-            }
-        } else if let Some(rules) = &library.rules
-            && let Some(first) = rules.first()
-            && let Some(os) = &first.os
-            && os.name.as_deref() != Some(os_name)
-        {
+        if !library_applies(library, platform, &context) {
             continue;
         }
         let info = library_path(&library.name, None, None);
@@ -427,6 +478,18 @@ pub fn classpath(input: &ArgumentsInput<'_>) -> (Vec<String>, Option<String>) {
     }
     .filter(|m| !m.is_empty());
     (vec!["-cp".to_owned(), joined], main_class)
+}
+
+fn library_applies(library: &Library, platform: Platform, context: &RuleContext) -> bool {
+    if let Some(natives) = &library.natives
+        && native_classifier(natives, platform).is_none()
+    {
+        return false;
+    }
+    library
+        .rules
+        .as_ref()
+        .is_none_or(|rules| allowed(rules, context))
 }
 
 pub fn loader_arguments(input: &ArgumentsInput<'_>) -> (Vec<String>, Vec<String>) {
@@ -492,8 +555,13 @@ mod tests {
             "arguments": {
                 "game": ["--username", "${auth_player_name}", "--version", "${version_name}", "--uuid", "${auth_uuid}",
                          {"rules": [{"action": "allow", "features": {"is_demo_user": true}}], "value": "--demo"},
-                         "--accessToken", "${auth_access_token}", "--clientId", "${clientid}", "--xuid", "${auth_xuid}", "--userType", "${user_type}"],
-                "jvm": ["-Djava.library.path=${natives_directory}", "-cp", "${classpath}"],
+                         "--accessToken", "${auth_access_token}", "--clientId", "${clientid}", "--xuid", "${auth_xuid}", "--userType", "${user_type}",
+                         {"rules": [{"action": "allow", "features": {"has_custom_resolution": true}}], "value": ["--width", "${resolution_width}", "--height", "${resolution_height}"]}],
+                "jvm": [{"rules": [{"action": "allow", "os": {"name": "osx"}}], "value": ["-XstartOnFirstThread"]},
+                        {"rules": [{"action": "allow", "os": {"name": "windows"}}], "value": "-XX:HeapDumpPath=MojangTricksIntelDriversForPerformance_javaw.exe_minecraft.exe.heapdump"},
+                        {"rules": [{"action": "allow", "os": {"name": "windows", "version": "^10\\."}}], "value": ["-Dos.name=Windows 10", "-Dos.version=10.0"]},
+                        {"rules": [{"action": "allow", "os": {"arch": "x86"}}], "value": "-Xss1M"},
+                        "-Djava.library.path=${natives_directory}", "-Dminecraft.launcher.brand=${launcher_name}", "-Dminecraft.launcher.version=${launcher_version}", "-cp", "${classpath}"],
                 "default-user-jvm": [
                     {"value": ["-Xms2G", "-XX:+UseStringDeduplication"]},
                     {"rules": [{"action": "allow", "os": {"name": "osx"}}, {"action": "allow", "os": {"name": "linux"}}], "value": ["-XX:+UseZGC"]}
@@ -631,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn jvm_arguments_follow_node_order() {
+    fn jvm_arguments_follow_the_official_launcher_order() {
         let version = modern_version();
         let account = account();
         let mut options = options();
@@ -644,27 +712,102 @@ mod tests {
             natives_list: false,
         };
         let jvm = jvm_arguments(&input);
-        assert_eq!(jvm[0], "-Xms1G");
-        assert_eq!(jvm[1], "-Xmx2G");
-        assert_eq!(jvm[2], "-XX:+UnlockExperimentalVMOptions");
+        let platform = Platform::current();
+        let position = |needle: &str| jvm.iter().position(|a| a == needle).unwrap();
+        let cp = position("-cp");
+        assert!(cp < position("-Xms1G"));
+        assert!(position("-Xms1G") < position("-Xmx2G"));
+        assert!(position("-Xmx2G") < position("-XX:+UnlockExperimentalVMOptions"));
+        assert_eq!(
+            jvm.contains(&"-XstartOnFirstThread".to_owned()),
+            platform == Platform::MacOs
+        );
+        assert_eq!(
+            jvm.contains(&"-Dos.name=Windows 10".to_owned()),
+            platform == Platform::Windows
+        );
+        assert_eq!(
+            jvm.iter().any(|a| a.starts_with("-XX:HeapDumpPath=")),
+            platform == Platform::Windows
+        );
+        assert_eq!(
+            jvm.contains(&"-Xss1M".to_owned()),
+            crate::foundation::os::Arch::current() == crate::foundation::os::Arch::X86
+        );
+        assert!(jvm.contains(&"-Djava.library.path=/root/versions/1.20.1/natives".to_owned()));
+        assert!(jvm.contains(&"-Dminecraft.launcher.brand=crust_core".to_owned()));
+        assert!(jvm.contains(&format!("-Dminecraft.launcher.version={LAUNCHER_VERSION}")));
+        assert!(jvm[cp + 1].ends_with("/root/versions/1.20.1/1.20.1.jar"));
         assert!(!jvm.contains(&"-XX:+UseG1GC".to_owned()));
         assert!(jvm.contains(&"-Djna.tmpdir=/root/versions/1.20.1/natives".to_owned()));
-        assert!(!jvm.iter().any(|a| a.starts_with("-Djava.library.path=")));
         assert!(jvm.contains(
             &"-Dlog4j.configurationFile=/root/assets/log_configs/client-1.12.xml".to_owned()
         ));
         assert!(jvm.contains(&"-XX:+UseStringDeduplication".to_owned()));
         assert!(!jvm.contains(&"-Xms2G".to_owned()));
-        assert!(!jvm.contains(&"-XX:+UseZGC".to_owned()));
+        assert_eq!(
+            jvm.contains(&"-XX:+UseZGC".to_owned()),
+            platform != Platform::Windows
+        );
         assert_eq!(jvm.last().unwrap(), "-Dcustom=1");
-        let os_specific = match Platform::current() {
-            Platform::MacOs => "-XstartOnFirstThread",
-            Platform::Linux => "-Xss1M",
-            Platform::Windows => {
-                "-XX:HeapDumpPath=MojangTricksIntelDriversForPerformance_javaw.exe_minecraft.exe.heapdump"
-            }
+        assert_eq!(jvm.iter().filter(|a| *a == "-cp").count(), 1);
+    }
+
+    #[test]
+    fn legacy_versions_get_a_synthesized_library_path_and_classpath() {
+        let version: VersionJson = serde_json::from_str(
+            r#"{"id": "1.12.2", "type": "release", "mainClass": "m",
+                "minecraftArguments": "--username ${auth_player_name}",
+                "assets": "1.12", "downloads": {}, "libraries": []}"#,
+        )
+        .unwrap();
+        let account = account();
+        let mut options = LaunchOptions::new("/root", "1.12.2");
+        options.screen.width = Some(1280);
+        options.screen.height = Some(720);
+        let input = ArgumentsInput {
+            version: &version,
+            loader: None,
+            account: &account,
+            options: &options,
+            natives_list: true,
         };
-        assert_eq!(jvm[11], os_specific);
+        let jvm = jvm_arguments(&input);
+        assert_eq!(jvm[0], "-Djava.library.path=/root/versions/1.12.2/natives");
+        assert_eq!(jvm[1], "-cp");
+        assert!(jvm[2].ends_with("/root/versions/1.12.2/1.12.2.jar"));
+        assert!(!jvm.contains(&"-XstartOnFirstThread".to_owned()));
+        assert_eq!(
+            game_arguments(&input),
+            vec!["--username", "Player", "--width", "1280", "--height", "720"]
+        );
+    }
+
+    #[test]
+    fn extras_already_provided_by_the_version_are_not_duplicated() {
+        let version: VersionJson = serde_json::from_str(
+            r#"{"id": "1.21", "type": "release", "mainClass": "m",
+                "arguments": {"game": [], "jvm": ["-Djna.tmpdir=${natives_directory}", "-cp", "${classpath}"]},
+                "downloads": {}, "libraries": []}"#,
+        )
+        .unwrap();
+        let account = account();
+        let options = LaunchOptions::new("/root", "1.21");
+        let input = ArgumentsInput {
+            version: &version,
+            loader: None,
+            account: &account,
+            options: &options,
+            natives_list: false,
+        };
+        let jvm = jvm_arguments(&input);
+        assert_eq!(
+            jvm.iter()
+                .filter(|a| a.starts_with("-Djna.tmpdir="))
+                .count(),
+            1
+        );
+        assert_eq!(jvm[0], "-Djna.tmpdir=/root/versions/1.21/natives");
     }
 
     #[test]
@@ -784,9 +927,77 @@ mod tests {
             .iter()
             .position(|a| a == "--launchTarget")
             .unwrap();
-        assert!(cp < ignore && ignore < main && main < username && username < target);
-        assert_eq!(plan.args[0], "-Xms1G");
+        assert!(ignore < cp && cp < main && main < username && username < target);
+        assert!(plan.args[0].starts_with("-DignoreList="));
+        assert!(plan.args.iter().position(|a| a == "-Xms1G").unwrap() > cp);
         assert!(plan.redacted_command(&["token"]).contains("????????"));
+    }
+
+    #[test]
+    fn disallowed_vanilla_libraries_do_not_shadow_the_allowed_variant() {
+        let version: VersionJson = serde_json::from_str(
+            r#"{"id": "1.12.2", "type": "release", "mainClass": "m", "assets": "1.12", "downloads": {}, "libraries": [
+                {"name": "org.lwjgl.lwjgl:lwjgl:2.9.4-nightly-20150209", "rules": [{"action": "allow"}, {"action": "disallow", "os": {"name": "osx"}}]},
+                {"name": "org.lwjgl.lwjgl:lwjgl:2.9.2-nightly-20140822", "rules": [{"action": "allow", "os": {"name": "osx"}}]},
+                {"name": "org.lwjgl.lwjgl:lwjgl-platform:2.9.4-nightly-20150209", "natives": {"linux": "natives-linux", "windows": "natives-windows", "osx": "natives-osx"}, "rules": [{"action": "allow"}, {"action": "disallow", "os": {"name": "osx"}}]},
+                {"name": "org.lwjgl.lwjgl:lwjgl-platform:2.9.2-nightly-20140822", "natives": {"linux": "natives-linux", "windows": "natives-windows", "osx": "natives-osx"}, "rules": [{"action": "allow", "os": {"name": "osx"}}]}
+            ]}"#,
+        )
+        .unwrap();
+        let account = account();
+        let options = LaunchOptions::new("/root", "1.12.2");
+        let input = ArgumentsInput {
+            version: &version,
+            loader: None,
+            account: &account,
+            options: &options,
+            natives_list: true,
+        };
+        let (cp, _) = classpath(&input);
+        let entries: Vec<&str> = cp[1]
+            .split(Platform::current().classpath_separator())
+            .collect();
+        let expected = if Platform::current() == Platform::MacOs {
+            "2.9.2-nightly-20140822"
+        } else {
+            "2.9.4-nightly-20150209"
+        };
+        assert_eq!(entries.len(), 3);
+        assert!(entries[0].ends_with(&format!("lwjgl-{expected}.jar")));
+        assert!(entries[1].ends_with(&format!("lwjgl-platform-{expected}.jar")));
+    }
+
+    #[test]
+    fn disallowed_loader_libraries_still_replace_the_vanilla_entry() {
+        let version: VersionJson = serde_json::from_str(
+            r#"{"id": "1.5.2", "type": "release", "mainClass": "m", "assets": "pre-1.6", "downloads": {}, "libraries": [
+                {"name": "org.ow2.asm:asm-all:4.1"},
+                {"name": "net.sf.jopt-simple:jopt-simple:4.5"}
+            ]}"#,
+        )
+        .unwrap();
+        let raw = serde_json::json!({
+            "id": "fabric-loader-0.16.9-1.5.2",
+            "mainClass": "net.fabricmc.loader.impl.launch.knot.KnotClient",
+            "libraries": [
+                {"name": "org.ow2.asm:asm-all:4.1", "rules": [{"action": "disallow"}]},
+                {"name": "org.ow2.asm:asm:9.7.1"}
+            ]
+        });
+        let loader = LoaderJson::from_value(raw, PathBuf::from("/root")).unwrap();
+        let account = account();
+        let options = LaunchOptions::new("/root", "1.5.2");
+        let input = ArgumentsInput {
+            version: &version,
+            loader: Some(&loader),
+            account: &account,
+            options: &options,
+            natives_list: true,
+        };
+        let (cp, _) = classpath(&input);
+        assert!(!cp[1].contains("asm-all"));
+        assert!(cp[1].contains("asm-9.7.1.jar"));
+        assert!(cp[1].contains("jopt-simple-4.5.jar"));
     }
 
     #[test]
@@ -876,7 +1087,7 @@ mod tests {
     }
 
     #[test]
-    fn screen_options_follow_node() {
+    fn screen_options_use_the_version_resolution_feature() {
         let version = modern_version();
         let account = account();
         let mut options = options();

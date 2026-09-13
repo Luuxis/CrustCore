@@ -8,6 +8,7 @@ use serde::Deserialize;
 use crate::foundation::maven::MavenCoordinate;
 use crate::foundation::options::LaunchOptions;
 use crate::foundation::os::{self, Arch, Platform};
+use crate::foundation::rules;
 use crate::network::{self, DownloadItem, HttpClient};
 use crate::providers::launchermeta::{self, LauncherMeta, VersionJson};
 
@@ -100,6 +101,14 @@ pub enum Error {
 
 pub fn is_old(json: &VersionJson) -> bool {
     matches!(json.assets.as_deref(), Some("legacy") | Some("pre-1.6"))
+}
+
+pub fn java_runtime_candidates(platform_key: &str) -> Vec<&str> {
+    match platform_key {
+        "mac-os-arm64" => vec![platform_key, "mac-os"],
+        "windows-arm64" => vec![platform_key, "windows-x64"],
+        other => vec![other],
+    }
 }
 
 impl Resolver {
@@ -202,9 +211,14 @@ impl Resolver {
 
     pub fn resolve_libraries(&self, json: &VersionJson, root: &Path, files: &mut GameFiles) {
         let libraries_dir = root.join("libraries");
-        let os_name = self.platform.mojang_name();
+        let context = rules::RuleContext::new(self.platform, self.arch);
         for library in &json.libraries {
             let downloads = library.downloads.as_ref();
+            if let Some(rules) = &library.rules
+                && !rules::allowed(rules, &context)
+            {
+                continue;
+            }
             let (artifact, label) = if let Some(natives) = &library.natives {
                 let Some(native) = crate::foundation::os::native_classifier(natives, self.platform)
                 else {
@@ -216,14 +230,6 @@ impl Resolver {
                     .and_then(|c| c.get(&classifier));
                 (artifact, LABEL_NATIVE)
             } else {
-                if let Some(rules) = &library.rules
-                    && let Some(first) = rules.first()
-                    && let Some(os) = &first.os
-                    && let Some(name) = &os.name
-                    && name != os_name
-                {
-                    continue;
-                }
                 (downloads.and_then(|d| d.artifact.as_ref()), LABEL_LIBRARIES)
             };
             let Some(artifact) = artifact else {
@@ -378,10 +384,9 @@ impl Resolver {
         let platform_key = os::java_runtime_platform(self.platform, self.arch)
             .ok_or(Error::UnsupportedPlatform)?;
         let index = self.meta.java_runtime_index().await?;
-        let entry = index
-            .get(platform_key)
-            .and_then(|components| components.get(&component))
-            .and_then(|entries| entries.first())
+        let entry = java_runtime_candidates(platform_key)
+            .into_iter()
+            .find_map(|key| index.get(key)?.get(&component)?.first())
             .ok_or_else(|| Error::JavaRuntimeUnavailable {
                 component: component.clone(),
                 platform: platform_key.to_owned(),
@@ -438,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn filters_libraries_like_node() {
+    fn filters_libraries_like_the_official_launcher() {
         let json = version(
             r#"{
             "id": "1.21.1", "mainClass": "m",
@@ -463,13 +468,22 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec![
-                "lwjgl-3.3.3.jar",
-                "lwjgl-3.3.3-natives-macos-arm64.jar",
-                "x-1.jar"
-            ]
+            vec!["lwjgl-3.3.3.jar", "lwjgl-3.3.3-natives-macos-arm64.jar"]
         );
         assert!(files.natives.is_empty());
+
+        let mut linux = GameFiles::default();
+        resolver(Platform::Linux, Arch::X64).resolve_libraries(
+            &json,
+            Path::new("/root"),
+            &mut linux,
+        );
+        let linux_names: Vec<String> = linux
+            .downloads
+            .iter()
+            .map(|d| d.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(linux_names, vec!["lwjgl-3.3.3.jar", "x-1.jar"]);
     }
 
     #[test]
@@ -536,6 +550,53 @@ mod tests {
             &mut linux,
         );
         assert!(linux.downloads.is_empty());
+    }
+
+    #[test]
+    fn arm64_runtimes_fall_back_to_x64_like_the_official_launcher() {
+        assert_eq!(
+            java_runtime_candidates("mac-os-arm64"),
+            vec!["mac-os-arm64", "mac-os"]
+        );
+        assert_eq!(
+            java_runtime_candidates("windows-arm64"),
+            vec!["windows-arm64", "windows-x64"]
+        );
+        assert_eq!(java_runtime_candidates("linux"), vec!["linux"]);
+    }
+
+    #[test]
+    fn library_rules_follow_mojang_semantics() {
+        let json = version(
+            r#"{
+            "id": "1.17.1", "mainClass": "m",
+            "downloads": {"client": {"sha1": "c", "size": 1, "url": "cu"}},
+            "libraries": [
+                {"name": "org.lwjgl:lwjgl:3.2.1", "downloads": {"artifact": {"path": "org/lwjgl/lwjgl/3.2.1/lwjgl-3.2.1.jar", "sha1": "a", "size": 1, "url": "u"}}, "rules": [{"action": "allow", "os": {"name": "osx"}}]},
+                {"name": "org.lwjgl:lwjgl:3.2.2", "downloads": {"artifact": {"path": "org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar", "sha1": "b", "size": 1, "url": "u"}}, "rules": [{"action": "allow"}, {"action": "disallow", "os": {"name": "osx"}}]}
+            ]}"#,
+        );
+        let mut mac = GameFiles::default();
+        resolver(Platform::MacOs, Arch::X64).resolve_libraries(&json, Path::new("/root"), &mut mac);
+        let mac_names: Vec<String> = mac
+            .downloads
+            .iter()
+            .map(|d| d.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(mac_names, vec!["lwjgl-3.2.1.jar"]);
+
+        let mut linux = GameFiles::default();
+        resolver(Platform::Linux, Arch::X64).resolve_libraries(
+            &json,
+            Path::new("/root"),
+            &mut linux,
+        );
+        let linux_names: Vec<String> = linux
+            .downloads
+            .iter()
+            .map(|d| d.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(linux_names, vec!["lwjgl-3.2.2.jar"]);
     }
 
     #[test]

@@ -145,13 +145,41 @@ the same argument order and the same filtering:
    are removed from the instance, exactly like `checkFiles`.
 5. Legacy natives are extracted into `versions/<id>/natives` and, for
    `legacy`/`pre-1.6` asset indexes, assets are copied into `resources/`.
-6. The JVM arguments, the classpath, the loader JVM arguments, the main class,
-   the game arguments and the loader game arguments are assembled in that order.
+6. The command line follows the official launcher: the loader JVM arguments,
+   then the `arguments.jvm` list of the version JSON evaluated with Mojang's
+   rules (`os.name`, `os.arch`, `os.version`, `features`) and placeholders
+   (`${natives_directory}`, `${launcher_name}`, `${launcher_version}`,
+   `${classpath}`), which carries `-XstartOnFirstThread`, the Windows heap dump
+   trick, `-Xss1M` for 32-bit JVMs, the Java 25 access flags of 26.1+ and
+   `-cp`. Versions with `minecraftArguments` get `-Djava.library.path` and
+   `-cp` synthesized instead. The launcher's own options (memory, G1 flags, the
+   natives directories, `-Xdock`, the log4j configuration, `default-user-jvm`
+   and `jvm_args`) follow, then the main class, the game arguments (with
+   `is_demo_user` and `has_custom_resolution` features) and the loader game
+   arguments. Library rules use the same Mojang semantics, so the
+   `allow`/`disallow osx` pairs of 1.14 to 1.18 pick exactly one LWJGL build.
+
+On macOS, JNA older than 5.13.0 aborts the game with `snprintf() output has
+been truncated` as soon as the game directory path is long. The `jna` and
+`jna-platform` libraries below 5.13.0 are therefore replaced by 5.13.0, both in
+the vanilla version JSON and in the Forge and NeoForge loader JSON (Forge ships
+its own copy that takes precedence on the classpath), and the `-DmergeModules`
+argument is rewritten to name the replaced jars.
+
+On macOS, Forge's early loading window initializes GLFW before the game does
+and, on Apple Silicon, leaves a pending `Cocoa: Failed to find service port for
+display` error that makes Minecraft 1.14 and 1.15 abort with `GLFW error before
+init`. The launcher therefore passes `-Dfml.earlyprogresswindow=false` to Forge
+on macOS, which is the fix recommended by Forge itself.
 
 ### Java
 
 The Mojang runtime matching the version's `javaVersion.component` is used by
-default. Like minecraft-java-core, the launcher falls back to an Azul Zulu build
+default. On Apple Silicon and Windows ARM64, when Mojang has no ARM build of the
+component (`jre-legacy`, `java-runtime-alpha` and `java-runtime-beta`, so every
+version before 1.19), the x64 runtime is used under Rosetta or Windows
+emulation, exactly like the official launcher, because those versions only ship
+x64 natives. Like minecraft-java-core, the launcher falls back to an Azul Zulu build
 from <https://api.azul.com> when Mojang has no runtime for the platform or the
 component (for example `jre-legacy` on Apple Silicon without
 `intel_enabled_mac`), when the runtime manifest has no Java executable, or when

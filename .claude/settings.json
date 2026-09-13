@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:files.minecraftforge.net)",
+      "WebFetch(domain:meta.prismlauncher.org)",
+      "WebFetch(domain:maven.neoforged.net)",
+      "WebFetch(domain:docs.neoforged.net)",
+      "WebFetch(domain:raw.githubusercontent.com)"
+    ]
+  }
+}

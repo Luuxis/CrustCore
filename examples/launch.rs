@@ -18,7 +18,8 @@ const CLIENT_ID: Option<&str> = None;
 const DATA_DIR: &str = "./data";
 const ACCOUNT_FILE: &str = "account.json";
 const MINECRAFT_PATH: &str = "minecraft";
-const API_URL: &str = "https://luuxcraft.fr/api/user/bb8f5247-1d38-41bb-ab6d-3200471a06b2/instances";
+const API_URL: &str =
+    "https://luuxcraft.fr/api/user/bb8f5247-1d38-41bb-ab6d-3200471a06b2/instances";
 const INSTANCE_NAME: &str = "dev";
 const DOWNLOAD_SIMULTANEOUS: usize = 30;
 const JAVA_VERSION: &str = "default"; // "default" for default system Java, or specify a version like "8", "11", etc.

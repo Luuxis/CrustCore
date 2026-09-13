@@ -1,2 +1,3 @@
 [alias]
 start = "run --example launch"
+try_all = "run --example try_all"
