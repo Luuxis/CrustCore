@@ -1,8 +1,9 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::os::{Arch, Platform};
+use super::os::{Arch, Platform, windows_version};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rule {
@@ -46,7 +47,48 @@ pub struct VersionRange {
     pub max: Option<String>,
 }
 
+pub fn os_version(platform: Platform) -> Option<String> {
+    match platform {
+        Platform::Windows => Some(windows_version().unwrap_or_else(|| "10.0".to_owned())),
+        _ => None,
+    }
+}
+
+fn compare_versions(left: &str, right: &str) -> Ordering {
+    let mut left = left.split('.');
+    let mut right = right.split('.');
+    loop {
+        let (a, b) = (left.next(), right.next());
+        if a.is_none() && b.is_none() {
+            return Ordering::Equal;
+        }
+        let a = a.and_then(|part| part.parse::<u64>().ok()).unwrap_or(0);
+        let b = b.and_then(|part| part.parse::<u64>().ok()).unwrap_or(0);
+        if a != b {
+            return a.cmp(&b);
+        }
+    }
+}
+
+fn range_matches(range: &VersionRange, os_version: Option<&str>) -> bool {
+    let Some(os_version) = os_version else {
+        return false;
+    };
+    if let Some(min) = &range.min
+        && compare_versions(os_version, min) == Ordering::Less
+    {
+        return false;
+    }
+    if let Some(max) = &range.max
+        && compare_versions(os_version, max) != Ordering::Less
+    {
+        return false;
+    }
+    true
+}
+
 pub fn evaluate_node(rules: &[Rule], platform: Platform) -> bool {
+    let version = os_version(platform);
     for rule in rules {
         let mut matches = true;
         if let Some(os) = &rule.os {
@@ -55,13 +97,11 @@ pub fn evaluate_node(rules: &[Rule], platform: Platform) -> bool {
             {
                 matches = false;
             }
-            if matches && let Some(range) = &os.version_range {
-                if range.min.is_some() {
-                    matches = platform == Platform::Windows;
-                }
-                if range.max.is_some() {
-                    matches = platform == Platform::Windows;
-                }
+            if matches
+                && let Some(range) = &os.version_range
+                && !range_matches(range, version.as_deref())
+            {
+                matches = false;
             }
         }
         let allow = rule.action == Action::Allow;
@@ -111,13 +151,18 @@ impl RuleContext {
         Self {
             platform,
             arch,
-            os_version: (platform == Platform::Windows).then(|| "10.0".to_owned()),
+            os_version: os_version(platform),
             features: HashMap::new(),
         }
     }
 
     pub fn with_feature(mut self, name: impl Into<String>, enabled: bool) -> Self {
         self.features.insert(name.into(), enabled);
+        self
+    }
+
+    pub fn with_os_version(mut self, version: impl Into<String>) -> Self {
+        self.os_version = Some(version.into());
         self
     }
 
@@ -141,6 +186,11 @@ impl Rule {
             }
             if let Some(pattern) = &os.version
                 && !version_matches(pattern, ctx.os_version.as_deref())
+            {
+                return false;
+            }
+            if let Some(range) = &os.version_range
+                && !range_matches(range, ctx.os_version.as_deref())
             {
                 return false;
             }
@@ -220,6 +270,54 @@ mod tests {
         assert!(version_matches("^10\\.", Some("10.0")));
         assert!(!version_matches("^10\\.", Some("6.1")));
         assert!(!version_matches("^10\\.", None));
+    }
+
+    #[test]
+    fn version_range_is_inclusive_min_and_exclusive_max() {
+        let range = |min: Option<&str>, max: Option<&str>| {
+            vec![Rule {
+                action: Action::Allow,
+                os: Some(OsRule {
+                    name: Some("windows".into()),
+                    version_range: Some(VersionRange {
+                        min: min.map(str::to_owned),
+                        max: max.map(str::to_owned),
+                    }),
+                    ..OsRule::default()
+                }),
+                features: None,
+            }]
+        };
+        let windows =
+            |version: &str| ctx(Platform::Windows, Arch::X64).with_os_version(version.to_owned());
+        let min = range(Some("10.0.17134"), None);
+        let max = range(None, Some("10.0.17134"));
+
+        assert!(allowed(&min, &windows("10.0.17134")));
+        assert!(!allowed(&max, &windows("10.0.17134")));
+        assert!(allowed(&min, &windows("10.0.19045")));
+        assert!(!allowed(&max, &windows("10.0.19045")));
+        assert!(!allowed(&min, &windows("10.0.16299")));
+        assert!(allowed(&max, &windows("10.0.16299")));
+        assert!(!allowed(&min, &windows("6.1.7601")));
+        assert!(allowed(&max, &windows("6.1.7601")));
+        assert!(allowed(&min, &windows("11.0")));
+        assert!(!allowed(&min, &ctx(Platform::MacOs, Arch::Arm64)));
+        assert!(!allowed(&max, &ctx(Platform::Linux, Arch::X64)));
+    }
+
+    #[test]
+    fn versions_compare_component_wise() {
+        assert_eq!(compare_versions("10.0", "10.0.0"), Ordering::Equal);
+        assert_eq!(
+            compare_versions("10.0.17134", "10.0.9600"),
+            Ordering::Greater
+        );
+        assert_eq!(compare_versions("6.3", "10.0"), Ordering::Less);
+        assert_eq!(
+            compare_versions("10.0.22631", "10.0.22631"),
+            Ordering::Equal
+        );
     }
 
     fn os(name: &str) -> Option<OsRule> {

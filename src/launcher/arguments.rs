@@ -266,19 +266,30 @@ pub fn jvm_arguments(input: &ArgumentsInput<'_>) -> Vec<String> {
         }
     }
 
+    let has_default_user_jvm = version
+        .arguments
+        .as_ref()
+        .is_some_and(|arguments| !arguments.default_user_jvm.is_empty());
+
     let mut extras = vec![
         format!("-Xms{}", options.memory.min),
         format!("-Xmx{}", options.memory.max),
-        "-XX:+UnlockExperimentalVMOptions".to_owned(),
-        "-XX:G1NewSizePercent=20".to_owned(),
-        "-XX:G1ReservePercent=20".to_owned(),
-        "-XX:MaxGCPauseMillis=50".to_owned(),
-        "-XX:G1HeapRegionSize=32M".to_owned(),
+    ];
+    if !has_default_user_jvm {
+        extras.extend([
+            "-XX:+UnlockExperimentalVMOptions".to_owned(),
+            "-XX:G1NewSizePercent=20".to_owned(),
+            "-XX:G1ReservePercent=20".to_owned(),
+            "-XX:MaxGCPauseMillis=50".to_owned(),
+            "-XX:G1HeapRegionSize=32M".to_owned(),
+        ]);
+    }
+    extras.extend([
         "-Dfml.ignoreInvalidMinecraftCertificates=true".to_owned(),
         format!("-Djna.tmpdir={natives}"),
         format!("-Dorg.lwjgl.system.SharedLibraryExtractPath={natives}"),
         format!("-Dio.netty.native.workdir={natives}"),
-    ];
+    ]);
 
     if platform == Platform::MacOs
         && input.loader.is_some()
@@ -727,7 +738,9 @@ mod tests {
         let cp = position("-cp");
         assert!(cp < position("-Xms1G"));
         assert!(position("-Xms1G") < position("-Xmx2G"));
-        assert!(position("-Xmx2G") < position("-XX:+UnlockExperimentalVMOptions"));
+        assert!(position("-Xmx2G") < position("-Djna.tmpdir=/root/versions/1.20.1/natives"));
+        assert!(!jvm.contains(&"-XX:+UnlockExperimentalVMOptions".to_owned()));
+        assert!(!jvm.contains(&"-XX:G1HeapRegionSize=32M".to_owned()));
         assert_eq!(
             jvm.contains(&"-XstartOnFirstThread".to_owned()),
             platform == Platform::MacOs
@@ -792,6 +805,8 @@ mod tests {
         assert_eq!(jvm[3], "-cp");
         assert!(jvm[4].ends_with("/root/versions/1.12.2/1.12.2.jar"));
         assert!(!jvm.contains(&"-XstartOnFirstThread".to_owned()));
+        assert!(jvm.contains(&"-XX:+UnlockExperimentalVMOptions".to_owned()));
+        assert!(jvm.contains(&"-XX:G1HeapRegionSize=32M".to_owned()));
         assert_eq!(
             game_arguments(&input),
             vec!["--username", "Player", "--width", "1280", "--height", "720"]
@@ -834,6 +849,60 @@ mod tests {
         assert_eq!(arg_key("-XX:G1HeapRegionSize=32M"), "-XX:G1HeapRegionSize");
         assert_eq!(arg_key("-XstartOnFirstThread"), "-XstartOnFirstThread");
         assert_eq!(arg_key("2G"), "2G");
+    }
+
+    #[test]
+    fn default_user_jvm_splits_on_the_windows_version_range() {
+        let version: VersionJson = serde_json::from_str(
+            r#"{"id": "26.2", "type": "release", "mainClass": "m", "downloads": {}, "libraries": [],
+                "arguments": {"game": [], "jvm": [], "default-user-jvm": [
+                    {"value": ["-Xms2G", "-Xmx4G", "-XX:+UseCompactObjectHeaders", "-XX:+AlwaysPreTouch", "-XX:+UseStringDeduplication"]},
+                    {"rules": [{"action": "allow", "os": {"name": "osx"}}, {"action": "allow", "os": {"name": "linux"}},
+                               {"action": "allow", "os": {"name": "windows", "versionRange": {"min": "10.0.17134"}}}],
+                     "value": ["-XX:+UseZGC"]},
+                    {"rules": [{"action": "allow", "os": {"name": "windows", "versionRange": {"max": "10.0.17134"}}}],
+                     "value": ["-XX:+UnlockExperimentalVMOptions", "-XX:+UseG1GC", "-XX:G1NewSizePercent=20", "-XX:G1ReservePercent=20", "-XX:MaxGCPauseMillis=50", "-XX:G1HeapRegionSize=32M"]}
+                ]}}"#,
+        )
+        .unwrap();
+        let arch = crate::foundation::os::Arch::X64;
+        let existing = vec!["-Xms1G".to_owned(), "-Xmx2G".to_owned()];
+
+        let modern_windows =
+            RuleContext::new(Platform::Windows, arch).with_os_version("10.0.19045");
+        let args = default_user_jvm_arguments(&version, &existing, &[], &modern_windows);
+        assert_eq!(
+            args,
+            vec![
+                "-XX:+UseCompactObjectHeaders",
+                "-XX:+AlwaysPreTouch",
+                "-XX:+UseStringDeduplication",
+                "-XX:+UseZGC"
+            ]
+        );
+
+        let old_windows = RuleContext::new(Platform::Windows, arch).with_os_version("6.1.7601");
+        let args = default_user_jvm_arguments(&version, &existing, &[], &old_windows);
+        assert!(!args.contains(&"-XX:+UseZGC".to_owned()));
+        assert!(args.contains(&"-XX:+UseG1GC".to_owned()));
+        assert!(args.contains(&"-XX:G1HeapRegionSize=32M".to_owned()));
+
+        for platform in [Platform::MacOs, Platform::Linux] {
+            let context = RuleContext::new(platform, arch);
+            let args = default_user_jvm_arguments(&version, &existing, &[], &context);
+            assert!(args.contains(&"-XX:+UseZGC".to_owned()));
+            assert!(!args.contains(&"-XX:+UseG1GC".to_owned()));
+        }
+
+        let user = vec!["-XX:+UseZGC".to_owned(), "-XX:+AlwaysPreTouch".to_owned()];
+        let args = default_user_jvm_arguments(&version, &existing, &user, &modern_windows);
+        assert_eq!(
+            args,
+            vec![
+                "-XX:+UseCompactObjectHeaders",
+                "-XX:+UseStringDeduplication"
+            ]
+        );
     }
 
     #[test]

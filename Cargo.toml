@@ -1,6 +1,6 @@
 [package]
 name = "crust_core"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2024"
 rust-version = "1.85"
 description = "Core library to download, install and launch Minecraft (versions, assets, libraries, Java runtime, mod loaders)"

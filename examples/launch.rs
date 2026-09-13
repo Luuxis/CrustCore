@@ -110,17 +110,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         None => Authenticator::new()?,
     };
     let account = load_or_authenticate(&auth).await?;
-    println!(
-        "Signed in as {} ({}), gamertag: {}, ownership: {:?}",
-        account.name,
-        account.uuid,
-        account
-            .xbox_account
-            .as_ref()
-            .and_then(|xbox| xbox.gamertag.as_deref())
-            .unwrap_or("?"),
-        account.meta.ownership
-    );
+    println!("Signed in as {}", account.uuid);
 
     println!("Fetching instance data...");
     let http = HttpClient::new()?;

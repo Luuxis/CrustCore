@@ -87,6 +87,36 @@ impl Arch {
     }
 }
 
+#[cfg(target_os = "windows")]
+pub fn windows_version() -> Option<String> {
+    #[repr(C)]
+    struct OsVersionInfoW {
+        size: u32,
+        major: u32,
+        minor: u32,
+        build: u32,
+        platform_id: u32,
+        csd_version: [u16; 128],
+    }
+
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn RtlGetVersion(info: *mut OsVersionInfoW) -> i32;
+    }
+
+    let mut info: OsVersionInfoW = unsafe { std::mem::zeroed() };
+    info.size = std::mem::size_of::<OsVersionInfoW>() as u32;
+    if unsafe { RtlGetVersion(&mut info) } != 0 {
+        return None;
+    }
+    Some(format!("{}.{}.{}", info.major, info.minor, info.build))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn windows_version() -> Option<String> {
+    None
+}
+
 pub fn effective_arch(platform: Platform, arch: Arch, intel_enabled_mac: bool) -> Arch {
     if intel_enabled_mac && platform == Platform::MacOs && arch == Arch::Arm64 {
         Arch::X64
