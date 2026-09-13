@@ -251,9 +251,19 @@ pub fn jvm_arguments(input: &ArgumentsInput<'_>) -> Vec<String> {
         None => vec![format!("-Djava.library.path={natives}")],
     };
     jvm.retain(|arg| !arg.starts_with("-Dminecraft.launcher."));
-    if !jvm.iter().any(|arg| arg == "-cp") {
-        jvm.push("-cp".to_owned());
-        jvm.push(placeholders["${classpath}"].clone());
+    let branding = [
+        format!("-Dminecraft.launcher.brand={LAUNCHER_NAME}"),
+        format!("-Dminecraft.launcher.version={LAUNCHER_VERSION}"),
+    ];
+    match jvm.iter().position(|arg| arg == "-cp") {
+        Some(index) => {
+            jvm.splice(index..index, branding);
+        }
+        None => {
+            jvm.extend(branding);
+            jvm.push("-cp".to_owned());
+            jvm.push(placeholders["${classpath}"].clone());
+        }
     }
 
     let mut extras = vec![
@@ -774,8 +784,13 @@ mod tests {
         };
         let jvm = jvm_arguments(&input);
         assert_eq!(jvm[0], "-Djava.library.path=/root/versions/1.12.2/natives");
-        assert_eq!(jvm[1], "-cp");
-        assert!(jvm[2].ends_with("/root/versions/1.12.2/1.12.2.jar"));
+        assert_eq!(jvm[1], "-Dminecraft.launcher.brand=crust_core");
+        assert_eq!(
+            jvm[2],
+            format!("-Dminecraft.launcher.version={LAUNCHER_VERSION}")
+        );
+        assert_eq!(jvm[3], "-cp");
+        assert!(jvm[4].ends_with("/root/versions/1.12.2/1.12.2.jar"));
         assert!(!jvm.contains(&"-XstartOnFirstThread".to_owned()));
         assert_eq!(
             game_arguments(&input),
